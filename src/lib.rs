@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 #[pymodule]
 mod spinningjenny {
     use std::sync::{
+        mpsc::{channel, Receiver},
         Mutex,
-        mpsc::{Receiver, channel},
     };
 
     use pyo3::prelude::*;
@@ -30,8 +30,14 @@ mod spinningjenny {
             slf
         }
 
-        fn __next__(slf: PyRef<'_, Self>) -> Option<PyResult<Py<PyAny>>> {
-            slf.receiver.lock().unwrap().recv().ok()
+        fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
+            if let Ok(result) = self.receiver.lock().unwrap().try_recv() {
+                return Some(result);
+            }
+            let receiver = &self.receiver;
+            // detach before waiting to receive, lest we deadlock with the
+            // interpreter
+            py.detach(|| receiver.lock().unwrap().recv().ok())
         }
     }
 
@@ -48,7 +54,9 @@ mod spinningjenny {
                 pool: ThreadPoolBuilder::new()
                     .num_threads(n_threads)
                     .spawn_handler(|thread| {
-                        std::thread::spawn(|| Python::attach(|_| thread.run()));
+                        // stay detached while idle so parked workers don't
+                        // deadlock with the interpreter
+                        std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
                         Ok(())
                     })
                     .build()
@@ -68,8 +76,8 @@ mod spinningjenny {
                 let func = func.clone_ref(py);
                 let sender = sender.clone();
                 self.pool.spawn_fifo(move || {
-                    let thread_py = unsafe { Python::assume_attached() };
-                    sender.send(func.call1(thread_py, (value,))).unwrap();
+                    let result = Python::attach(move |py| func.call1(py, (value,)));
+                    sender.send(result).unwrap();
                 });
             }
             Py::new(py, _ResultIter::new(receiver))
