@@ -13,6 +13,13 @@ def spin_100us(_x):
         pass
 
 
+def spin_10us(_x):
+    # Spin for 100µs, hopefully exactly:
+    start_ns = time_ns()
+    while time_ns() - start_ns < 10_000:
+        pass
+
+
 def noop(_x):
     pass
 
@@ -35,7 +42,7 @@ class Sequential:
         return (func(arg) for arg in args)
 
 
-@pytest.mark.parametrize("function", [noop, spin_100us])
+@pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
 @pytest.mark.parametrize("executor_factory", [OrigExecutor, SpinExecutor, Sequential])
 def test_one_thousand_calls(benchmark, function, executor_factory):
     def run():
