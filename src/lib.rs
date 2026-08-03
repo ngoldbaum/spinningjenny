@@ -47,6 +47,10 @@ mod spinningjenny {
             Ok(Self {
                 pool: ThreadPoolBuilder::new()
                     .num_threads(n_threads)
+                    .spawn_handler(|thread| {
+                        std::thread::spawn(|| Python::attach(|_| thread.run()));
+                        Ok(())
+                    })
                     .build()
                     .expect("TODO handle error"),
             })
@@ -64,9 +68,8 @@ mod spinningjenny {
                 let func = func.clone_ref(py);
                 let sender = sender.clone();
                 self.pool.spawn_fifo(move || {
-                    Python::attach(|thread_py| {
-                        sender.send(func.call1(thread_py, (value,))).unwrap()
-                    });
+                    let thread_py = unsafe { Python::assume_attached() };
+                    sender.send(func.call1(thread_py, (value,))).unwrap();
                 });
             }
             Py::new(py, _ResultIter::new(receiver))
