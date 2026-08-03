@@ -11,3 +11,10 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "pytest-benchmark"
+]
