@@ -25,7 +25,8 @@ def noop(_x):
 
 
 class OrigExecutor(OrigExecutor):
-    pass
+    def map_unordered(self, *args, **kwargs):
+        return super().map(*args, **kwargs)
 
 
 class Sequential:
@@ -38,7 +39,7 @@ class Sequential:
     def __exit__(self, *args):
         return False
 
-    def map(self, func, args):
+    def map_unordered(self, func, args):
         return (func(arg) for arg in args)
 
 
@@ -47,7 +48,7 @@ class Sequential:
 def test_one_thousand_calls(benchmark, function, executor_factory):
     def run():
         with executor_factory(8) as executor:
-            result = executor.map(function, range(1000))
+            result = executor.map_unordered(function, range(1000))
             return list(result)
 
     result = benchmark(run)

@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 #[pymodule]
 mod spinningjenny {
     use std::sync::{
-        mpsc::{channel, Receiver},
         Mutex,
+        mpsc::{Receiver, channel},
     };
 
     use pyo3::prelude::*;
@@ -64,7 +64,7 @@ mod spinningjenny {
             })
         }
 
-        fn map(
+        fn map_unordered(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
