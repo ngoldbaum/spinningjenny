@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 
 import pytest
 
-from spinningjenny import ThreadPoolExecutor as SpinExecutor
+from spinningjenny import ThreadPoolExecutor as SpinExecutor, thread_local_pool
 
 
 def spin_100us(_x):
@@ -44,7 +44,7 @@ class Sequential:
 
 
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
-@pytest.mark.parametrize("executor_factory", [OrigExecutor, SpinExecutor, Sequential])
+@pytest.mark.parametrize("executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential])
 def test_one_thousand_calls(benchmark, function, executor_factory):
     def run():
         with executor_factory(8) as executor:
