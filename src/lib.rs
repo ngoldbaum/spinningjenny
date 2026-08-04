@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 /// A faster ThreadPoolExecutor.
 #[pymodule]
+#[pyo3(name = "_spinningjenny")]
 mod spinningjenny {
     use std::sync::{
         Mutex,
@@ -12,11 +13,11 @@ mod spinningjenny {
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
     #[pyclass]
-    struct _ResultIter {
+    struct ResultIter {
         receiver: Mutex<Receiver<PyResult<Py<PyAny>>>>,
     }
 
-    impl _ResultIter {
+    impl ResultIter {
         fn new(receiver: Receiver<PyResult<Py<PyAny>>>) -> Self {
             Self {
                 receiver: Mutex::new(receiver),
@@ -25,7 +26,7 @@ mod spinningjenny {
     }
 
     #[pymethods]
-    impl _ResultIter {
+    impl ResultIter {
         fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
             slf
         }
@@ -69,7 +70,7 @@ mod spinningjenny {
             py: Python<'_>,
             func: Py<PyAny>,
             iterable: Py<PyAny>,
-        ) -> PyResult<Py<_ResultIter>> {
+        ) -> PyResult<Py<ResultIter>> {
             let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
             for value in iterable.bind(py).try_iter()? {
                 let value = value?.unbind();
@@ -80,7 +81,7 @@ mod spinningjenny {
                     sender.send(result).unwrap();
                 });
             }
-            Py::new(py, _ResultIter::new(receiver))
+            Py::new(py, ResultIter::new(receiver))
         }
 
         fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
