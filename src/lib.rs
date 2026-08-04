@@ -4,9 +4,12 @@ use pyo3::prelude::*;
 #[pymodule]
 #[pyo3(name = "_spinningjenny")]
 mod spinningjenny {
-    use std::sync::{
-        Mutex,
-        mpsc::{Receiver, channel},
+    use std::{
+        cell::{Cell, RefCell},
+        sync::{
+            Mutex,
+            mpsc::{Receiver, channel},
+        },
     };
 
     use pyo3::prelude::*;
@@ -40,6 +43,39 @@ mod spinningjenny {
             // interpreter
             py.detach(|| receiver.lock().unwrap().recv().ok())
         }
+    }
+
+    thread_local! {
+        // The `contextvars` Context to run functions in.
+        pub static CONTEXTVARS_CONTEXT: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
+        // Each `map_unordered()` call in the current thread increments the
+        // generation, so we can distinguish contexts between them..
+        pub static GENERATION: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Increment the generation.
+    fn new_generation() -> usize {
+        let result = GENERATION.get() + 1;
+        GENERATION.set(result);
+        result
+    }
+
+    /// Return a copy of `parent_context`, which is a `contextvars.Context`. If
+    /// possible this context is retrieved and cached on a thread local.
+    fn thread_local_context(
+        py: Python<'_>,
+        parent_context: Py<PyAny>,
+        generation: usize,
+    ) -> PyResult<Py<PyAny>> {
+        let context = if let Some(context) = CONTEXTVARS_CONTEXT.take() && GENERATION.get() == generation {
+            context
+        } else {
+            GENERATION.set(generation);
+            parent_context.call_method0(py, "copy")?
+        };
+        let result = context.clone_ref(py);
+        CONTEXTVARS_CONTEXT.replace(Some(context));
+        Ok(result)
     }
 
     #[pyclass]
@@ -79,6 +115,7 @@ mod spinningjenny {
 
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
+            let generation = new_generation();
 
             for value in iterable.bind(py).try_iter()? {
                 let value = value?.unbind();
@@ -88,9 +125,8 @@ mod spinningjenny {
                 self.pool.spawn_fifo(move || {
                     let result = Python::attach(move |thread_py| {
                         // Can't have the same context called by multiple
-                        // threads at once, so we need to copy it. Copying seems
-                        // cheap, so that's OK.
-                        let local_context = context.call_method0(thread_py, "copy")?;
+                        // threads at once, so we need a copy per thread.
+                        let local_context = thread_local_context(thread_py, context, generation)?;
                         // Run the function under the context:
                         local_context.call_method(thread_py, "run", (func, value), None)
                     });
