@@ -45,13 +45,17 @@ mod spinningjenny {
     #[pyclass]
     struct ThreadPoolExecutor {
         pool: ThreadPool,
+        /// Cached `contextvars.copy_context`:
+        copy_context: Py<PyAny>,
     }
 
     #[pymethods]
     impl ThreadPoolExecutor {
         #[new]
-        fn py_new(n_threads: usize) -> PyResult<Self> {
+        fn py_new(py: Python<'_>, n_threads: usize) -> PyResult<Self> {
+            let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
             Ok(Self {
+                copy_context,
                 pool: ThreadPoolBuilder::new()
                     .num_threads(n_threads)
                     .spawn_handler(|thread| {
@@ -72,12 +76,24 @@ mod spinningjenny {
             iterable: Py<PyAny>,
         ) -> PyResult<Py<ResultIter>> {
             let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
+
+            // Copy the current contextvars context:
+            let context = self.copy_context.call0(py)?;
+
             for value in iterable.bind(py).try_iter()? {
                 let value = value?.unbind();
                 let func = func.clone_ref(py);
+                let context = context.clone_ref(py);
                 let sender = sender.clone();
                 self.pool.spawn_fifo(move || {
-                    let result = Python::attach(move |py| func.call1(py, (value,)));
+                    let result = Python::attach(move |thread_py| {
+                        // Can't have the same context called by multiple
+                        // threads at once, so we need to copy it. Copying seems
+                        // cheap, so that's OK.
+                        let local_context = context.call_method0(thread_py, "copy")?;
+                        // Run the function under the context:
+                        local_context.call_method(thread_py, "run", (func, value), None)
+                    });
                     sender.send(result).unwrap();
                 });
             }
