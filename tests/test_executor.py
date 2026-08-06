@@ -64,3 +64,25 @@ def test_resource_usage(usecs: int, num_threads: int) -> None:
         assert len(list(result)) == 1000
     # Give it a little leeway in case it goes over:
     assert factory.max < 10 * num_threads
+
+
+@pytest.mark.parametrize("usecs", [0, 10, 100])
+@pytest.mark.parametrize("num_threads", [2, 4, 6])
+def test_stop_executing_if_no_iteration(usecs: int, num_threads: int) -> None:
+    """
+    TODO match buffersize argument
+
+    Two different aspects: computing on-demand is opt-in, limited memory usage
+    is on by default?
+    """
+    factory = ResourceFactory()
+
+    def task(resource):
+        assert isinstance(resource, Resource)
+        run_for_usecs(usecs)
+
+    with ThreadPoolExecutor(num_threads) as executor:
+        result = executor.map_unordered(task, (factory.create() for _ in range(1000)))
+        assert len(list(result)) == 1000
+    # Give it a little leeway in case it goes over:
+    assert factory.max < 10 * num_threads

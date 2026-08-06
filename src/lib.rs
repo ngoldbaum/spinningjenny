@@ -8,7 +8,7 @@ mod spinningjenny {
         cell::{Cell, RefCell},
         sync::{
             Mutex,
-            mpsc::{Receiver, channel},
+            mpsc::{Receiver, sync_channel},
         },
     };
 
@@ -115,7 +115,7 @@ mod spinningjenny {
             func: Py<PyAny>,
             iterable: Py<PyAny>,
         ) -> PyResult<Py<ResultIter>> {
-            let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
+            let (sender, receiver) = sync_channel::<PyResult<Py<PyAny>>>(2 * self.n_threads);
 
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
