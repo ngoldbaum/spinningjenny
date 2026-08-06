@@ -83,6 +83,7 @@ mod spinningjenny {
     #[pyclass]
     struct ThreadPoolExecutor {
         pool: ThreadPool,
+        n_threads: usize,
         /// Cached `contextvars.copy_context`:
         copy_context: Py<PyAny>,
     }
@@ -94,6 +95,7 @@ mod spinningjenny {
             let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
             Ok(Self {
                 copy_context,
+                n_threads,
                 pool: ThreadPoolBuilder::new()
                     .num_threads(n_threads)
                     .spawn_handler(|thread| {
@@ -120,21 +122,20 @@ mod spinningjenny {
             let generation = new_generation();
 
             let py_iterator = iterable.bind(py).try_iter()?.unbind();
+            let n_threads = self.n_threads;
             // Iterate over the Python iterator in the thread pool, and spawn
             // tasks there. The LIFO nature of Rayon's spawn() should ensure
             // lazy iteration over the Python iterator.
             self.pool.spawn(move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
-                    for value in py_iterator.bind(iterating_py) {
+                    for (i, value) in py_iterator.bind(iterating_py).into_iter().enumerate() {
                         let value = value?.unbind();
                         let func = func.clone_ref(iterating_py);
                         let context = context.clone_ref(iterating_py);
                         let sender = sender.clone();
-                        // This will spawn within the current pool, in a LIFO
-                        // manner, so this thread might actually run some of
-                        // these, pausing iterating.
-                        rayon::spawn(move || {
+                        // This will spawn within the current pool.
+                        rayon::spawn_fifo(move || {
                             let result = Python::attach(move |thread_py| {
                                 // Can't have the same context called by multiple
                                 // threads at once, so we need a copy per thread.
@@ -145,6 +146,13 @@ mod spinningjenny {
                             });
                             sender.send(result).unwrap();
                         });
+                        if i.is_multiple_of(4 * n_threads) {
+                            for _ in 0..4 {
+                                if rayon::yield_local() == Some(rayon::Yield::Idle) {
+                                    break;
+                                }
+                            }
+                        }
                     }
                     PyResult::Ok(())
                 });
