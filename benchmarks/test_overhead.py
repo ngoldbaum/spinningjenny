@@ -1,23 +1,17 @@
-from time import time_ns
 from concurrent.futures import ThreadPoolExecutor as OrigExecutor
 
 import pytest
 
 from spinningjenny import ThreadPoolExecutor as SpinExecutor, thread_local_pool
+from spinningjenny._testing import run_for_usecs
 
 
 def spin_100us(_x):
-    # Spin for 100µs, hopefully exactly:
-    start_ns = time_ns()
-    while time_ns() - start_ns < 100_000:
-        pass
+    run_for_usecs(100)
 
 
 def spin_10us(_x):
-    # Spin for 100µs, hopefully exactly:
-    start_ns = time_ns()
-    while time_ns() - start_ns < 10_000:
-        pass
+    run_for_usecs(10)
 
 
 def noop(_x):
@@ -44,7 +38,9 @@ class Sequential:
 
 
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
-@pytest.mark.parametrize("executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential])
+@pytest.mark.parametrize(
+    "executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential]
+)
 def test_one_thousand_calls(benchmark, function, executor_factory):
     def run():
         with executor_factory(8) as executor:
