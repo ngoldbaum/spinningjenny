@@ -67,7 +67,9 @@ mod spinningjenny {
         parent_context: Py<PyAny>,
         generation: usize,
     ) -> PyResult<Py<PyAny>> {
-        let context = if let Some(context) = CONTEXTVARS_CONTEXT.take() && GENERATION.get() == generation {
+        let context = if let Some(context) = CONTEXTVARS_CONTEXT.take()
+            && GENERATION.get() == generation
+        {
             context
         } else {
             GENERATION.set(generation);
@@ -117,22 +119,39 @@ mod spinningjenny {
             let context = self.copy_context.call0(py)?;
             let generation = new_generation();
 
-            for value in iterable.bind(py).try_iter()? {
-                let value = value?.unbind();
-                let func = func.clone_ref(py);
-                let context = context.clone_ref(py);
-                let sender = sender.clone();
-                self.pool.spawn_fifo(move || {
-                    let result = Python::attach(move |thread_py| {
-                        // Can't have the same context called by multiple
-                        // threads at once, so we need a copy per thread.
-                        let local_context = thread_local_context(thread_py, context, generation)?;
-                        // Run the function under the context:
-                        local_context.call_method(thread_py, "run", (func, value), None)
-                    });
-                    sender.send(result).unwrap();
+            let py_iterator = iterable.bind(py).try_iter()?.unbind();
+            // Iterate over the Python iterator in the thread pool, and spawn
+            // tasks there. The LIFO nature of Rayon's spawn() should ensure
+            // lazy iteration over the Python iterator.
+            self.pool.spawn(move || {
+                let orig_sender = sender.clone();
+                let result = Python::attach(move |iterating_py| {
+                    for value in py_iterator.bind(iterating_py) {
+                        let value = value?.unbind();
+                        let func = func.clone_ref(iterating_py);
+                        let context = context.clone_ref(iterating_py);
+                        let sender = sender.clone();
+                        // This will spawn within the current pool, in a LIFO
+                        // manner, so this thread might actually run some of
+                        // these, pausing iterating.
+                        rayon::spawn(move || {
+                            let result = Python::attach(move |thread_py| {
+                                // Can't have the same context called by multiple
+                                // threads at once, so we need a copy per thread.
+                                let local_context =
+                                    thread_local_context(thread_py, context, generation)?;
+                                // Run the function under the context:
+                                local_context.call_method(thread_py, "run", (func, value), None)
+                            });
+                            sender.send(result).unwrap();
+                        });
+                    }
+                    PyResult::Ok(())
                 });
-            }
+                if let Err(err) = result {
+                    orig_sender.send(Err(err)).unwrap();
+                }
+            });
             Py::new(py, ResultIter::new(receiver))
         }
 
