@@ -1,3 +1,4 @@
+from __future__ import annotations
 from threading import RLock
 
 import pytest
@@ -16,7 +17,7 @@ class Resource:
     A resource that can created concurrently, a stand-in for memory.
     """
 
-    def __init__(self, factory):
+    def __init__(self, factory: ResourceFactory):
         self.factory = factory
 
     def __del__(self):
@@ -31,19 +32,20 @@ class ResourceFactory:
         self.max = 0
         self.resources = 0
 
-    def create(self):
+    def create(self) -> Resource:
         with self.lock:
             self.resources += 1
             self.max = max(self.max, self.resources)
         return Resource(self)
 
-    def _destroy(self):
+    def _destroy(self) -> None:
         with self.lock:
             self.resources -= 1
 
 
 @pytest.mark.parametrize("usecs", [0, 10, 100])
-def test_resource_usage(usecs):
+@pytest.mark.parametrize("num_threads", [2, 4, 6])
+def test_resource_usage(usecs: int, num_threads: int) -> None:
     """
     The amounts of resources used by the executor should be constained.
 
@@ -57,7 +59,8 @@ def test_resource_usage(usecs):
         assert isinstance(resource, Resource)
         run_for_usecs(usecs)
 
-    with ThreadPoolExecutor(2) as executor:
+    with ThreadPoolExecutor(num_threads) as executor:
         result = executor.map_unordered(task, (factory.create() for _ in range(1000)))
         assert len(list(result)) == 1000
-    print("Maximum concurrent resources:", factory.max)
+    # Give it a little leeway in case it goes over:
+    assert factory.max < 10 * num_threads
