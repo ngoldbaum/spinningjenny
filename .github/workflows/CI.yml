@@ -26,8 +26,6 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64
           - runner: ubuntu-latest
-            target: x86
-          - runner: ubuntu-latest
             target: aarch64
     steps:
       - uses: actions/checkout@v6
@@ -41,6 +39,14 @@ jobs:
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
+      - name: Install built wheel and test
+        run: |
+          python3.14t -m venv venv
+          . venv/bin/activate
+          pip install --upgrade pip
+          python -m pip install dist/spinningjenny*cp314t*.whl
+          python -m pip install --only-deps '.[test]'
+          pytest tests
       - name: Upload wheels
         uses: actions/upload-artifact@v6
         with:
