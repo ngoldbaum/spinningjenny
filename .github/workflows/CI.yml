@@ -29,9 +29,9 @@ jobs:
             target: aarch64
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.x"
+          python-version: "3.14t"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -40,11 +40,12 @@ jobs:
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Install built wheel and test
+        if: matrix.conf.target == 'x86_64'
         run: |
           python3.14t -m venv venv
           . venv/bin/activate
           pip install --upgrade pip
-          python -m pip install dist/spinningjenny*cp314t*.whl
+          python -m pip install dist/spinningjenny*cp314t*x86_64*.whl
           python -m pip install --only-deps '.[test]'
           pytest tests
       - name: Upload wheels
