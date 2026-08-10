@@ -6,6 +6,7 @@ Better performance and efficiency:
 
 * Much less overhead per task.
   This means you can usefully parallelize more cases where there are many tasks and/or fast tasks.
+* Limit how many tasks are iterated over, even when `buffersize` is not used, reducing memory usage when lazy task creation is used.
 
 Correctness:
 

@@ -8,10 +8,11 @@ mod spinningjenny {
         cell::{Cell, RefCell},
         sync::{
             Mutex,
-            mpsc::{Receiver, channel},
+            atomic::{AtomicU64, Ordering},
         },
     };
 
+    use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
     use pyo3::prelude::*;
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -35,13 +36,25 @@ mod spinningjenny {
         }
 
         fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
-            if let Ok(result) = self.receiver.lock().unwrap().try_recv() {
+            // Avoid blocking here, so we have consistent lock acquisition order
+            // and don't deadlock. First, non-blocking fast pass:
+            if let Some(result) = self
+                .receiver
+                .try_lock()
+                .ok()
+                .and_then(|receiver| receiver.try_recv().ok())
+            {
                 return Some(result);
             }
+            // If that fails, detach from Python and then block on recv():
             let receiver = &self.receiver;
-            // detach before waiting to receive, lest we deadlock with the
-            // interpreter
             py.detach(|| receiver.lock().unwrap().recv().ok())
+        }
+
+        /// Is the receiver buffer full? Intended for use by tests only.
+        fn _is_full(&self, py: Python<'_>) -> bool {
+            let receiver = &self.receiver;
+            py.detach(|| receiver.lock().unwrap().is_full())
         }
     }
 
@@ -50,14 +63,16 @@ mod spinningjenny {
         pub static CONTEXTVARS_CONTEXT: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
         // Each `map_unordered()` call in the current thread increments the
         // generation, so we can distinguish contexts between them..
-        pub static GENERATION: Cell<usize> = const { Cell::new(0) };
+        pub static GENERATION: Cell<u64> = const { Cell::new(0) };
     }
 
+    /// Each `map_unordered()` call in the increments the global generation, so
+    /// we can distinguish contexts between them.
+    static GLOBAL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
     /// Increment the generation.
-    fn new_generation() -> usize {
-        let result = GENERATION.get() + 1;
-        GENERATION.set(result);
-        result
+    fn new_generation() -> u64 {
+        GLOBAL_GENERATION.fetch_add(1, Ordering::AcqRel)
     }
 
     /// Return a copy of `parent_context`, which is a `contextvars.Context`. If
@@ -65,9 +80,11 @@ mod spinningjenny {
     fn thread_local_context(
         py: Python<'_>,
         parent_context: Py<PyAny>,
-        generation: usize,
+        generation: u64,
     ) -> PyResult<Py<PyAny>> {
-        let context = if let Some(context) = CONTEXTVARS_CONTEXT.take() && GENERATION.get() == generation {
+        let context = if let Some(context) = CONTEXTVARS_CONTEXT.take()
+            && GENERATION.get() == generation
+        {
             context
         } else {
             GENERATION.set(generation);
@@ -81,6 +98,7 @@ mod spinningjenny {
     #[pyclass]
     struct ThreadPoolExecutor {
         pool: ThreadPool,
+        n_threads: usize,
         /// Cached `contextvars.copy_context`:
         copy_context: Py<PyAny>,
     }
@@ -92,6 +110,7 @@ mod spinningjenny {
             let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
             Ok(Self {
                 copy_context,
+                n_threads,
                 pool: ThreadPoolBuilder::new()
                     .num_threads(n_threads)
                     .spawn_handler(|thread| {
@@ -105,34 +124,81 @@ mod spinningjenny {
             })
         }
 
+        #[pyo3(signature = (func, iterable, buffersize = None))]
         fn map_unordered(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
             iterable: Py<PyAny>,
+            buffersize: Option<usize>,
         ) -> PyResult<Py<ResultIter>> {
-            let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
-
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
+            // Make sure the iterable is iterable:
+            let py_iterator = iterable.bind(py).try_iter()?.unbind();
+
+            let (sender, receiver) = if let Some(buffersize) = buffersize {
+                bounded(buffersize)
+            } else {
+                unbounded()
+            };
+
+            // A unique id for the contextvars context associated with this
+            // call.
             let generation = new_generation();
 
-            for value in iterable.bind(py).try_iter()? {
-                let value = value?.unbind();
-                let func = func.clone_ref(py);
-                let context = context.clone_ref(py);
-                let sender = sender.clone();
-                self.pool.spawn_fifo(move || {
-                    let result = Python::attach(move |thread_py| {
-                        // Can't have the same context called by multiple
-                        // threads at once, so we need a copy per thread.
-                        let local_context = thread_local_context(thread_py, context, generation)?;
-                        // Run the function under the context:
-                        local_context.call_method(thread_py, "run", (func, value), None)
-                    });
-                    sender.send(result).unwrap();
+            let n_threads = self.n_threads;
+            // Iterate over the Python iterator in the thread pool, and spawn
+            // tasks there. The LIFO nature of Rayon's spawn() should ensure
+            // lazy iteration over the Python iterator.
+            self.pool.spawn(move || {
+                let orig_sender = sender.clone();
+                let result = Python::attach(move |iterating_py| {
+                    for (i, value) in py_iterator.bind(iterating_py).into_iter().enumerate() {
+                        let value = value?.unbind();
+                        let func = func.clone_ref(iterating_py);
+                        let context = context.clone_ref(iterating_py);
+                        let sender = sender.clone();
+                        // This will spawn within the current pool.
+                        rayon::spawn_fifo(move || {
+                            Python::attach(move |thread_py| {
+                                let result = thread_local_context(thread_py, context, generation)
+                                    .and_then(|local_context| {
+                                        local_context.call_method(
+                                            thread_py,
+                                            "run",
+                                            (func, value),
+                                            None,
+                                        )
+                                    });
+                                // We don't want to block while attached, since that
+                                // can block Python GC, resulting in deadlock when
+                                // buffersize is set and these threads block.
+                                if let Err(TrySendError::Full(result)) = sender.try_send(result) {
+                                    // If we get an error sending, that
+                                    // means the Receiver has been dropped.
+                                    // So not much we can do.
+                                    let _ = thread_py.detach(|| sender.send(result));
+                                };
+                            });
+                        });
+                        // Occasionally take a break from iterating to run some
+                        // tasks in this thread, so that we don't load too many
+                        // tasks into memory. Other threads should steal from
+                        // this one, so just because this one runs out of tasks
+                        // doesn't mean no work is being done.
+                        if i.is_multiple_of(4 * n_threads) {
+                            while rayon::yield_local() != Some(rayon::Yield::Idle) {}
+                        }
+                    }
+                    PyResult::Ok(())
                 });
-            }
+                if let Err(err) = result {
+                    // If we get an error, that means the Receiver has been
+                    // dropped. So not much we can do.
+                    let _ = orig_sender.send(Err(err));
+                }
+            });
             Py::new(py, ResultIter::new(receiver))
         }
 
