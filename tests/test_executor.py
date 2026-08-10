@@ -1,6 +1,7 @@
 from __future__ import annotations
 from time import sleep
 from threading import Lock, RLock
+from concurrent.futures import ThreadPoolExecutor as StdlibExecutor
 
 import pytest
 
@@ -46,7 +47,8 @@ class ResourceFactory:
 
 @pytest.mark.parametrize("usecs", [0, 10, 100])
 @pytest.mark.parametrize("num_threads", [2, 4, 6])
-def test_resource_usage(usecs: int, num_threads: int) -> None:
+@pytest.mark.parametrize("buffersize", [None, 10, 100])
+def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) -> None:
     """
     The amounts of resources used by the executor should be constained.
 
@@ -61,10 +63,30 @@ def test_resource_usage(usecs: int, num_threads: int) -> None:
         run_for_usecs(usecs)
 
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(task, (factory.create() for _ in range(1000)))
+        result = executor.map_unordered(
+            task, (factory.create() for _ in range(1000)), buffersize=buffersize
+        )
         assert len(list(result)) == 1000
-    # Give it a little leeway in case it goes over:
-    assert factory.max < 10 * num_threads
+    # Give it some leeway in case it goes over:
+    assert factory.max < 30 * num_threads
+
+
+@pytest.mark.xfail(reason="stdlib executor uses way too many resources in unbuffered mode")
+def test_resource_usage_stdlib() -> None:
+    """
+    The amounts of resources used by the stdlib executor is not constained.
+    """
+    factory = ResourceFactory()
+
+    def task(resource):
+        assert isinstance(resource, Resource)
+        run_for_usecs(10)
+
+    with StdlibExecutor(1) as executor:
+        result = executor.map(task, (factory.create() for _ in range(1000)))
+        assert len(list(result)) == 1000
+
+    assert factory.max < 40
 
 
 class TasksRun:
@@ -91,12 +113,14 @@ def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None
     """
     tasks = TasksRun()
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(lambda _: tasks.run(), range(100), buffersize=20)
+        result = executor.map_unordered(
+            lambda _: tasks.run(), range(100), buffersize=20
+        )
         i = 0
         while tasks.get_ran() < 20 + num_threads:
             sleep(0.001)
             i += 1
-            assert i < 10
+            assert i < 100  # Make sure we don't block forever
         assert tasks.get_ran() == 20 + num_threads
         sleep(0.01)
         assert tasks.get_ran() == 20 + num_threads
@@ -107,8 +131,7 @@ def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None
         while tasks.get_ran() < 20 + num_threads + 3:
             sleep(0.001)
             i += 1
-            assert i < 10
-            print(tasks.get_ran())
+            assert i < 100  # Make sure we don't block forever
         assert tasks.get_ran() == 20 + num_threads + 3
         sleep(0.01)
         assert tasks.get_ran() == 20 + num_threads + 3

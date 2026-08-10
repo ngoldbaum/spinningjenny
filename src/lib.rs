@@ -172,13 +172,11 @@ mod spinningjenny {
                         });
                         // Occasionally take a break from iterating to run some
                         // tasks in this thread, so that we don't load too many
-                        // tasks into memory.
+                        // tasks into memory. Other threads should steal from
+                        // this one, so just because this one runs out of tasks
+                        // doesn't mean no work is being done.
                         if i.is_multiple_of(4 * n_threads) {
-                            for _ in 0..4 {
-                                if rayon::yield_local() == Some(rayon::Yield::Idle) {
-                                    break;
-                                }
-                            }
+                            while rayon::yield_local() != Some(rayon::Yield::Idle) {}
                         }
                     }
                     PyResult::Ok(())
