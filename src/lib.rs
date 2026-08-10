@@ -1,39 +1,5 @@
 use pyo3::prelude::*;
 
-use std::sync::mpsc::{SendError, Sender, SyncSender, TrySendError};
-
-/// One of `std::sync::mpsc::{Sender,SyncSender}`.
-trait CommonSender<T>: Clone + Send {
-    /// Same as underlying classes.
-    fn send(&self, t: T) -> Result<(), SendError<T>>;
-
-    /// Either same as underlying class, or always succeeds.
-    fn try_send(&self, t: T) -> Result<(), TrySendError<T>>;
-}
-
-impl<T: Send> CommonSender<T> for Sender<T> {
-    fn send(&self, t: T) -> Result<(), SendError<T>> {
-        self.send(t)
-    }
-
-    fn try_send(&self, t: T) -> Result<(), TrySendError<T>> {
-        match self.send(t) {
-            Ok(()) => Ok(()),
-            Err(SendError(t)) => Err(TrySendError::Disconnected(t)),
-        }
-    }
-}
-
-impl<T: Send> CommonSender<T> for SyncSender<T> {
-    fn send(&self, t: T) -> Result<(), SendError<T>> {
-        self.send(t)
-    }
-
-    fn try_send(&self, t: T) -> Result<(), TrySendError<T>> {
-        self.try_send(t)
-    }
-}
-
 /// A faster ThreadPoolExecutor.
 #[pymodule]
 #[pyo3(name = "_spinningjenny")]
@@ -43,12 +9,11 @@ mod spinningjenny {
         sync::{
             Mutex,
             atomic::{AtomicU64, Ordering},
-            mpsc::{Receiver, TrySendError, channel, sync_channel},
         },
     };
 
-    use super::CommonSender;
-    use pyo3::{prelude::*, types::PyIterator};
+    use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
+    use pyo3::prelude::*;
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
     #[pyclass]
@@ -78,6 +43,12 @@ mod spinningjenny {
             // detach before waiting to receive, lest we deadlock with the
             // interpreter
             py.detach(|| receiver.lock().unwrap().recv().ok())
+        }
+
+        /// Is the receiver buffer full? Intended for use by tests only.
+        fn _is_full(&self, py: Python<'_>) -> bool {
+            let receiver = &self.receiver;
+            py.detach(|| receiver.lock().unwrap().is_full())
         }
     }
 
@@ -126,18 +97,48 @@ mod spinningjenny {
         copy_context: Py<PyAny>,
     }
 
+    #[pymethods]
     impl ThreadPoolExecutor {
-        /// Run all tasks in the given context, with either a ``Sender`` or
-        /// ``SyncSender`` getting the results.
-        fn map_unordered_for_sender<
-            C: CommonSender<PyResult<Py<PyAny>>> + 'static + Send + Sync,
-        >(
+        #[new]
+        fn py_new(py: Python<'_>, n_threads: usize) -> PyResult<Self> {
+            let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
+            Ok(Self {
+                copy_context,
+                n_threads,
+                pool: ThreadPoolBuilder::new()
+                    .num_threads(n_threads)
+                    .spawn_handler(|thread| {
+                        // stay detached while idle so parked workers don't
+                        // deadlock with the interpreter
+                        std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
+                        Ok(())
+                    })
+                    .build()
+                    .expect("TODO handle error"),
+            })
+        }
+
+        #[pyo3(signature = (func, iterable, buffersize = None))]
+        fn map_unordered(
             &self,
-            context: Py<PyAny>,
+            py: Python<'_>,
             func: Py<PyAny>,
-            py_iterator: Py<PyIterator>,
-            sender: C,
-        ) {
+            iterable: Py<PyAny>,
+            buffersize: Option<usize>,
+        ) -> PyResult<Py<ResultIter>> {
+            // Copy the current contextvars context:
+            let context = self.copy_context.call0(py)?;
+            // Make sure the iterable is iterable:
+            let py_iterator = iterable.bind(py).try_iter()?.unbind();
+
+            let (sender, receiver) = if let Some(buffersize) = buffersize {
+                bounded(buffersize)
+            } else {
+                unbounded()
+            };
+
+            // A unique id for the contextvars context associated with this
+            // call.
             let generation = new_generation();
 
             let n_threads = self.n_threads;
@@ -192,52 +193,7 @@ mod spinningjenny {
                     let _ = orig_sender.send(Err(err));
                 }
             });
-        }
-    }
-
-    #[pymethods]
-    impl ThreadPoolExecutor {
-        #[new]
-        fn py_new(py: Python<'_>, n_threads: usize) -> PyResult<Self> {
-            let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
-            Ok(Self {
-                copy_context,
-                n_threads,
-                pool: ThreadPoolBuilder::new()
-                    .num_threads(n_threads)
-                    .spawn_handler(|thread| {
-                        // stay detached while idle so parked workers don't
-                        // deadlock with the interpreter
-                        std::thread::spawn(move || Python::attach(|py| py.detach(|| thread.run())));
-                        Ok(())
-                    })
-                    .build()
-                    .expect("TODO handle error"),
-            })
-        }
-
-        #[pyo3(signature = (func, iterable, buffersize = None))]
-        fn map_unordered(
-            &self,
-            py: Python<'_>,
-            func: Py<PyAny>,
-            iterable: Py<PyAny>,
-            buffersize: Option<usize>,
-        ) -> PyResult<Py<ResultIter>> {
-            // Copy the current contextvars context:
-            let context = self.copy_context.call0(py)?;
-            // Make sure the iterable is iterable:
-            let py_iterator = iterable.bind(py).try_iter()?.unbind();
-
-            if let Some(buffersize) = buffersize {
-                let (sender, receiver) = sync_channel::<PyResult<Py<PyAny>>>(buffersize);
-                self.map_unordered_for_sender(context, func, py_iterator, sender);
-                Py::new(py, ResultIter::new(receiver))
-            } else {
-                let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
-                self.map_unordered_for_sender(context, func, py_iterator, sender);
-                Py::new(py, ResultIter::new(receiver))
-            }
+            Py::new(py, ResultIter::new(receiver))
         }
 
         fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

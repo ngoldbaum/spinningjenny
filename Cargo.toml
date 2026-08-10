@@ -9,6 +9,7 @@ name = "spinningjenny"
 crate-type = ["cdylib"]
 
 [dependencies]
+crossbeam-channel = "0.5.16"
 pyo3 = "0.29.0"
 rayon = "1.12.0"
 

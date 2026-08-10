@@ -97,26 +97,24 @@ def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None
         result = executor.map_unordered(
             lambda _: tasks.run(), range(100), buffersize=20
         )
-        i = 0
-        while tasks.get_ran() < 20 + num_threads:
-            sleep(0.001)
-            i += 1
-            assert i < 100  # Make sure we don't block forever
-        assert tasks.get_ran() == 20 + num_threads
+        while not result._is_full():
+            pass
+        ran = tasks.get_ran()
+        assert 20 <= ran <= 20 + num_threads
+        # If we're full, sleeping should only be able to add tasks in the race
+        # condition between hitting full and the rest of the threads finishing
+        # a task and blocking on sending to the full queue:
         sleep(0.01)
-        assert tasks.get_ran() == 20 + num_threads
+        assert 20 <= tasks.get_ran() <= 20 + num_threads
         next(result)
         next(result)
         next(result)
-        i = 0
-        while tasks.get_ran() < 20 + num_threads + 3:
-            sleep(0.001)
-            i += 1
-            assert i < 100  # Make sure we don't block forever
-        assert tasks.get_ran() == 20 + num_threads + 3
-        sleep(0.01)
-        assert tasks.get_ran() == 20 + num_threads + 3
+        while not result._is_full():
+            pass
+        assert 23 <= tasks.get_ran() <= ran + num_threads + 3
+        # Get the rest, ensure everything ran:
         list(result)
+        assert tasks.get_ran() == 100
 
 
 @pytest.mark.parametrize("buffersize", [None, 5])
