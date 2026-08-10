@@ -46,7 +46,7 @@ jobs:
           . venv/bin/activate
           pip install --upgrade pip
           python -m pip install dist/spinningjenny*cp314t*x86_64*.whl
-          python -m pip install --only-deps '.[test]'
+          python -m pip install pytest
           pytest tests
       - name: Upload wheels
         uses: actions/upload-artifact@v6
