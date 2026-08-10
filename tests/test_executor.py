@@ -1,5 +1,6 @@
 from __future__ import annotations
-from threading import RLock
+from time import sleep
+from threading import Lock, RLock
 
 import pytest
 
@@ -66,23 +67,43 @@ def test_resource_usage(usecs: int, num_threads: int) -> None:
     assert factory.max < 10 * num_threads
 
 
-@pytest.mark.parametrize("usecs", [0, 10, 100])
+class TasksRun:
+    """Track how many tasks ran."""
+
+    def __init__(self):
+        self.lock = Lock()
+        self.ran = 0
+
+    def run(self):
+        with self.lock:
+            self.ran += 1
+
+    def get_ran(self):
+        with self.lock:
+            return self.ran
+
+
 @pytest.mark.parametrize("num_threads", [2, 4, 6])
-def test_stop_executing_if_no_iteration(usecs: int, num_threads: int) -> None:
+def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None:
     """
-    TODO match buffersize argument
-
-    Two different aspects: computing on-demand is opt-in, limited memory usage
-    is on by default?
+    If ``buffersize`` is set, at most ``buffersize + num_threads`` tasks can be
+    executed before work stops so long as no iteration is happening.
     """
-    factory = ResourceFactory()
-
-    def task(resource):
-        assert isinstance(resource, Resource)
-        run_for_usecs(usecs)
-
+    tasks = TasksRun()
+    retrieved = 0
     with ThreadPoolExecutor(num_threads) as executor:
-        result = executor.map_unordered(task, (factory.create() for _ in range(1000)))
-        assert len(list(result)) == 1000
-    # Give it a little leeway in case it goes over:
-    assert factory.max < 10 * num_threads
+        result = executor.map_unordered(lambda _: tasks.run(), range(100), buffersize=20)
+        while tasks.get_ran() < 20 + num_threads:
+            sleep(0.001)
+        assert tasks.get_ran() == 20 + num_threads
+        sleep(0.01)
+        assert tasks.get_ran() == 20 + num_threads
+        result.next()
+        result.next()
+        result.next()
+        while tasks.get_ran() < 20 + num_threads + 3:
+            sleep(0.001)
+        assert tasks.get_ran() == 20 + num_threads + 3
+        sleep(0.01)
+        assert tasks.get_ran() == 20 + num_threads + 3
+        list(result)

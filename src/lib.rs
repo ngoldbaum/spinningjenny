@@ -8,7 +8,7 @@ mod spinningjenny {
         cell::{Cell, RefCell},
         sync::{
             Mutex,
-            mpsc::{Receiver, sync_channel},
+            mpsc::{Receiver, channel, sync_channel},
         },
     };
 
@@ -109,13 +109,15 @@ mod spinningjenny {
             })
         }
 
+        #[pyo3(signature = (func, iterable, buffersize = None))]
         fn map_unordered(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
             iterable: Py<PyAny>,
+            buffersize: Option<usize>,
         ) -> PyResult<Py<ResultIter>> {
-            let (sender, receiver) = sync_channel::<PyResult<Py<PyAny>>>(2 * self.n_threads);
+            let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
 
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
