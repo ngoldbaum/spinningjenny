@@ -40,7 +40,7 @@ jobs:
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Install built wheel and test
-        if: matrix.conf.target == 'x86_64'
+        if: matrix.platform.target == 'x86_64'
         run: |
           python3.14t -m venv venv
           . venv/bin/activate
