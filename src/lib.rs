@@ -151,24 +151,26 @@ mod spinningjenny {
                         let sender = sender.clone();
                         // This will spawn within the current pool.
                         rayon::spawn_fifo(move || {
-                            let result = Python::attach(move |thread_py| {
-                                // Can't have the same context called by multiple
-                                // threads at once, so we need a copy per thread.
-                                let local_context =
-                                    thread_local_context(thread_py, context, generation)?;
-                                // Run the function under the context:
-                                local_context.call_method(thread_py, "run", (func, value), None)
+                            Python::attach(move |thread_py| {
+                                let result = thread_local_context(thread_py, context, generation)
+                                    .and_then(|local_context| {
+                                        local_context.call_method(
+                                            thread_py,
+                                            "run",
+                                            (func, value),
+                                            None,
+                                        )
+                                    });
+                                // We don't want to block while attached, since that
+                                // can block Python GC, resulting in deadlock when
+                                // buffersize is set and these threads block.
+                                if let Err(TrySendError::Full(result)) = sender.try_send(result) {
+                                    // If we get an error sending, that
+                                    // means the Receiver has been dropped.
+                                    // So not much we can do.
+                                    let _ = thread_py.detach(|| sender.send(result));
+                                };
                             });
-                            // We don't want to block while attached, since that
-                            // can block Python GC, resulting in deadlock when
-                            // buffersize is set and these threads block. And
-                            // sometimes this will run inline in the iterating
-                            // thread so it will still be attached.
-                            if let Err(TrySendError::Full(result)) = sender.try_send(result) {
-                                Python::attach(|thread_py| {
-                                    thread_py.detach(|| sender.send(result).unwrap())
-                                });
-                            };
                         });
                         // Occasionally take a break from iterating to run some
                         // tasks in this thread, so that we don't load too many
@@ -182,7 +184,9 @@ mod spinningjenny {
                     PyResult::Ok(())
                 });
                 if let Err(err) = result {
-                    orig_sender.send(Err(err)).unwrap();
+                    // If we get an error, that means the Receiver has been
+                    // dropped. So not much we can do.
+                    let _ = orig_sender.send(Err(err));
                 }
             });
         }

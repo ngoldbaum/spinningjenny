@@ -1,7 +1,6 @@
 from __future__ import annotations
 from time import sleep
-from threading import Lock, RLock
-from concurrent.futures import ThreadPoolExecutor as StdlibExecutor
+from threading import Lock, RLock, Condition
 
 import pytest
 
@@ -71,24 +70,6 @@ def test_resource_usage(usecs: int, num_threads: int, buffersize: None | int) ->
     assert factory.max < 30 * num_threads
 
 
-@pytest.mark.xfail(reason="stdlib executor uses way too many resources in unbuffered mode")
-def test_resource_usage_stdlib() -> None:
-    """
-    The amounts of resources used by the stdlib executor is not constained.
-    """
-    factory = ResourceFactory()
-
-    def task(resource):
-        assert isinstance(resource, Resource)
-        run_for_usecs(10)
-
-    with StdlibExecutor(1) as executor:
-        result = executor.map(task, (factory.create() for _ in range(1000)))
-        assert len(list(result)) == 1000
-
-    assert factory.max < 40
-
-
 class TasksRun:
     """Track how many tasks ran."""
 
@@ -136,3 +117,37 @@ def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None
         sleep(0.01)
         assert tasks.get_ran() == 20 + num_threads + 3
         list(result)
+
+
+@pytest.mark.parametrize("buffersize", [None, 5])
+def test_drop_without_iterating_over_all_items(buffersize: None | int) -> None:
+    """
+    Dropping the results iterator doesn't stop execution.
+    """
+    counter = []
+    results = Condition()
+
+    def inc(x):
+        run_for_usecs(10)
+        with results:
+            counter.append(x)
+            if len(counter) == 1000:
+                results.notify()
+        return x
+
+    with ThreadPoolExecutor(2) as executor:
+        iterator = executor.map_unordered(inc, range(1000), buffersize=buffersize)
+        next(iterator)
+        del iterator
+
+    with results:
+        results.wait(10)
+    assert sorted(counter) == list(range(1000))
+
+
+def test_drop_does_not_panic() -> None:
+    """Dropping the results iterator doesn't panic."""
+    executor = ThreadPoolExecutor(2)
+    it = executor.map_unordered(lambda x: x, range(1000), buffersize=5)
+    next(it)
+    del it
