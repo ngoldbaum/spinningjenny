@@ -36,12 +36,18 @@ mod spinningjenny {
         }
 
         fn __next__(&self, py: Python<'_>) -> Option<PyResult<Py<PyAny>>> {
-            if let Ok(result) = self.receiver.lock().unwrap().try_recv() {
+            // Avoid blocking here, so we have consistent lock acquisition order
+            // and don't deadlock. First, non-blocking fast pass:
+            if let Some(result) = self
+                .receiver
+                .try_lock()
+                .ok()
+                .and_then(|receiver| receiver.try_recv().ok())
+            {
                 return Some(result);
             }
+            // If that fails, detach from Python and then block on recv():
             let receiver = &self.receiver;
-            // detach before waiting to receive, lest we deadlock with the
-            // interpreter
             py.detach(|| receiver.lock().unwrap().recv().ok())
         }
 
