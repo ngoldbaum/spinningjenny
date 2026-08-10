@@ -1,5 +1,39 @@
 use pyo3::prelude::*;
 
+use std::sync::mpsc::{SendError, Sender, SyncSender, TrySendError};
+
+/// One of `std::sync::mpsc::{Sender,SyncSender}`.
+trait CommonSender<T>: Clone + Send {
+    /// Same as underlying classes.
+    fn send(&self, t: T) -> Result<(), SendError<T>>;
+
+    /// Either same as underlying class, or always succeeds.
+    fn try_send(&self, t: T) -> Result<(), TrySendError<T>>;
+}
+
+impl<T: Send> CommonSender<T> for Sender<T> {
+    fn send(&self, t: T) -> Result<(), SendError<T>> {
+        self.send(t)
+    }
+
+    fn try_send(&self, t: T) -> Result<(), TrySendError<T>> {
+        match self.send(t) {
+            Ok(()) => Ok(()),
+            Err(SendError(t)) => Err(TrySendError::Disconnected(t)),
+        }
+    }
+}
+
+impl<T: Send> CommonSender<T> for SyncSender<T> {
+    fn send(&self, t: T) -> Result<(), SendError<T>> {
+        self.send(t)
+    }
+
+    fn try_send(&self, t: T) -> Result<(), TrySendError<T>> {
+        self.try_send(t)
+    }
+}
+
 /// A faster ThreadPoolExecutor.
 #[pymodule]
 #[pyo3(name = "_spinningjenny")]
@@ -8,11 +42,12 @@ mod spinningjenny {
         cell::{Cell, RefCell},
         sync::{
             Mutex,
-            mpsc::{Receiver, channel, sync_channel},
+            mpsc::{Receiver, TrySendError, channel, sync_channel},
         },
     };
 
-    use pyo3::prelude::*;
+    use super::CommonSender;
+    use pyo3::{prelude::*, types::PyIterator};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
     #[pyclass]
@@ -88,6 +123,73 @@ mod spinningjenny {
         copy_context: Py<PyAny>,
     }
 
+    impl ThreadPoolExecutor {
+        /// Run all tasks in the given context, with either a ``Sender`` or
+        /// ``SyncSender`` getting the results.
+        fn map_unordered_for_sender<
+            C: CommonSender<PyResult<Py<PyAny>>> + 'static + Send + Sync,
+        >(
+            &self,
+            context: Py<PyAny>,
+            func: Py<PyAny>,
+            py_iterator: Py<PyIterator>,
+            sender: C,
+        ) {
+            let generation = new_generation();
+
+            let n_threads = self.n_threads;
+            // Iterate over the Python iterator in the thread pool, and spawn
+            // tasks there. The LIFO nature of Rayon's spawn() should ensure
+            // lazy iteration over the Python iterator.
+            self.pool.spawn(move || {
+                let orig_sender = sender.clone();
+                let result = Python::attach(move |iterating_py| {
+                    for (i, value) in py_iterator.bind(iterating_py).into_iter().enumerate() {
+                        let value = value?.unbind();
+                        let func = func.clone_ref(iterating_py);
+                        let context = context.clone_ref(iterating_py);
+                        let sender = sender.clone();
+                        // This will spawn within the current pool.
+                        rayon::spawn_fifo(move || {
+                            let result = Python::attach(move |thread_py| {
+                                // Can't have the same context called by multiple
+                                // threads at once, so we need a copy per thread.
+                                let local_context =
+                                    thread_local_context(thread_py, context, generation)?;
+                                // Run the function under the context:
+                                local_context.call_method(thread_py, "run", (func, value), None)
+                            });
+                            // We don't want to block while attached, since that
+                            // can block Python GC, resulting in deadlock when
+                            // buffersize is set and these threads block. And
+                            // sometimes this will run inline in the iterating
+                            // thread so it will still be attached.
+                            if let Err(TrySendError::Full(result)) = sender.try_send(result) {
+                                Python::attach(|thread_py| {
+                                    thread_py.detach(|| sender.send(result).unwrap())
+                                });
+                            };
+                        });
+                        // Occasionally take a break from iterating to run some
+                        // tasks in this thread, so that we don't load too many
+                        // tasks into memory.
+                        if i.is_multiple_of(4 * n_threads) {
+                            for _ in 0..4 {
+                                if rayon::yield_local() == Some(rayon::Yield::Idle) {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    PyResult::Ok(())
+                });
+                if let Err(err) = result {
+                    orig_sender.send(Err(err)).unwrap();
+                }
+            });
+        }
+    }
+
     #[pymethods]
     impl ThreadPoolExecutor {
         #[new]
@@ -117,52 +219,20 @@ mod spinningjenny {
             iterable: Py<PyAny>,
             buffersize: Option<usize>,
         ) -> PyResult<Py<ResultIter>> {
-            let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
-
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
-            let generation = new_generation();
-
+            // Make sure the iterable is iterable:
             let py_iterator = iterable.bind(py).try_iter()?.unbind();
-            let n_threads = self.n_threads;
-            // Iterate over the Python iterator in the thread pool, and spawn
-            // tasks there. The LIFO nature of Rayon's spawn() should ensure
-            // lazy iteration over the Python iterator.
-            self.pool.spawn(move || {
-                let orig_sender = sender.clone();
-                let result = Python::attach(move |iterating_py| {
-                    for (i, value) in py_iterator.bind(iterating_py).into_iter().enumerate() {
-                        let value = value?.unbind();
-                        let func = func.clone_ref(iterating_py);
-                        let context = context.clone_ref(iterating_py);
-                        let sender = sender.clone();
-                        // This will spawn within the current pool.
-                        rayon::spawn_fifo(move || {
-                            let result = Python::attach(move |thread_py| {
-                                // Can't have the same context called by multiple
-                                // threads at once, so we need a copy per thread.
-                                let local_context =
-                                    thread_local_context(thread_py, context, generation)?;
-                                // Run the function under the context:
-                                local_context.call_method(thread_py, "run", (func, value), None)
-                            });
-                            sender.send(result).unwrap();
-                        });
-                        if i.is_multiple_of(4 * n_threads) {
-                            for _ in 0..4 {
-                                if rayon::yield_local() == Some(rayon::Yield::Idle) {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    PyResult::Ok(())
-                });
-                if let Err(err) = result {
-                    orig_sender.send(Err(err)).unwrap();
-                }
-            });
-            Py::new(py, ResultIter::new(receiver))
+
+            if let Some(buffersize) = buffersize {
+                let (sender, receiver) = sync_channel::<PyResult<Py<PyAny>>>(buffersize);
+                self.map_unordered_for_sender(context, func, py_iterator, sender);
+                Py::new(py, ResultIter::new(receiver))
+            } else {
+                let (sender, receiver) = channel::<PyResult<Py<PyAny>>>();
+                self.map_unordered_for_sender(context, func, py_iterator, sender);
+                Py::new(py, ResultIter::new(receiver))
+            }
         }
 
         fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

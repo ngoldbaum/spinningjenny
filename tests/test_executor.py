@@ -90,19 +90,25 @@ def test_buffersize_limits_execution_when_no_iteration(num_threads: int) -> None
     executed before work stops so long as no iteration is happening.
     """
     tasks = TasksRun()
-    retrieved = 0
     with ThreadPoolExecutor(num_threads) as executor:
         result = executor.map_unordered(lambda _: tasks.run(), range(100), buffersize=20)
+        i = 0
         while tasks.get_ran() < 20 + num_threads:
             sleep(0.001)
+            i += 1
+            assert i < 10
         assert tasks.get_ran() == 20 + num_threads
         sleep(0.01)
         assert tasks.get_ran() == 20 + num_threads
-        result.next()
-        result.next()
-        result.next()
+        next(result)
+        next(result)
+        next(result)
+        i = 0
         while tasks.get_ran() < 20 + num_threads + 3:
             sleep(0.001)
+            i += 1
+            assert i < 10
+            print(tasks.get_ran())
         assert tasks.get_ran() == 20 + num_threads + 3
         sleep(0.01)
         assert tasks.get_ran() == 20 + num_threads + 3
