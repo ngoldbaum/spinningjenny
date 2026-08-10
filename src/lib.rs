@@ -42,6 +42,7 @@ mod spinningjenny {
         cell::{Cell, RefCell},
         sync::{
             Mutex,
+            atomic::{AtomicU64, Ordering},
             mpsc::{Receiver, TrySendError, channel, sync_channel},
         },
     };
@@ -85,14 +86,16 @@ mod spinningjenny {
         pub static CONTEXTVARS_CONTEXT: RefCell<Option<Py<PyAny>>> = const { RefCell::new(None) };
         // Each `map_unordered()` call in the current thread increments the
         // generation, so we can distinguish contexts between them..
-        pub static GENERATION: Cell<usize> = const { Cell::new(0) };
+        pub static GENERATION: Cell<u64> = const { Cell::new(0) };
     }
 
+    /// Each `map_unordered()` call in the increments the global generation, so
+    /// we can distinguish contexts between them.
+    static GLOBAL_GENERATION: AtomicU64 = AtomicU64::new(0);
+
     /// Increment the generation.
-    fn new_generation() -> usize {
-        let result = GENERATION.get() + 1;
-        GENERATION.set(result);
-        result
+    fn new_generation() -> u64 {
+        GLOBAL_GENERATION.fetch_add(1, Ordering::AcqRel)
     }
 
     /// Return a copy of `parent_context`, which is a `contextvars.Context`. If
@@ -100,7 +103,7 @@ mod spinningjenny {
     fn thread_local_context(
         py: Python<'_>,
         parent_context: Py<PyAny>,
-        generation: usize,
+        generation: u64,
     ) -> PyResult<Py<PyAny>> {
         let context = if let Some(context) = CONTEXTVARS_CONTEXT.take()
             && GENERATION.get() == generation
