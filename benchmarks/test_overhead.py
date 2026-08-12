@@ -33,18 +33,21 @@ class Sequential:
     def __exit__(self, *args):
         return False
 
-    def map_unordered(self, func, args):
+    def map_unordered(self, func, args, buffersize=None):
         return (func(arg) for arg in args)
 
 
+@pytest.mark.parametrize("buffersize", [None, 100])
 @pytest.mark.parametrize("function", [noop, spin_10us, spin_100us])
 @pytest.mark.parametrize(
     "executor_factory", [OrigExecutor, SpinExecutor, thread_local_pool, Sequential]
 )
-def test_one_thousand_calls(benchmark, function, executor_factory):
+def test_one_thousand_calls(benchmark, buffersize, function, executor_factory):
     def run():
         with executor_factory(8) as executor:
-            result = executor.map_unordered(function, range(1000))
+            result = executor.map_unordered(
+                function, range(1000), buffersize=buffersize
+            )
             return list(result)
 
     result = benchmark(run)
