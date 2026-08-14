@@ -1,6 +1,7 @@
 from __future__ import annotations
 from time import sleep
 from threading import Lock, RLock, Condition
+from typing import Callable, Iterable
 
 import pytest
 
@@ -8,9 +9,27 @@ from spinningjenny import ThreadPoolExecutor
 from spinningjenny._testing import run_for_usecs
 
 
-def test_minimal():
-    with ThreadPoolExecutor(2) as executor:
-        assert sorted(executor.map_unordered(lambda x: x * 2, range(3))) == [0, 2, 4]
+@pytest.mark.parametrize(
+    "func,arguments",
+    [
+        (lambda x: x + 1, [range(1000)]),
+        (lambda a, b: a + b, [range(1, 1001), range(2, 1002)]),
+    ],
+)
+@pytest.mark.parametrize("n_jobs", [1, 2, 4])
+def test_parallel_thread_map_results(
+    func: Callable, arguments: list[Iterable], n_jobs: int
+) -> None:
+    """
+    ``map_unordered()`` gives the same results as Python built-in ``map()``.
+
+    Other than order, anyway.
+    """
+    expected = list(map(func, *arguments))
+    with ThreadPoolExecutor(n_jobs) as pool:
+        actual = pool.map_unordered(func, *arguments)
+        assert not isinstance(actual, list)
+        assert expected == sorted(actual)
 
 
 class Resource:
@@ -149,3 +168,11 @@ def test_drop_does_not_panic() -> None:
     it = executor.map_unordered(lambda x: x, range(1000), buffersize=5)
     next(it)
     del it
+
+
+def test_bad_buffersize() -> None:
+    """`buffersize` must be > 0."""
+    with ThreadPoolExecutor(2) as pool:
+        for i in [-100, -1, 0]:
+            with pytest.raises(ValueError, match="buffersize must be"):
+                pool.map_unordered(lambda x: 1, range(2), buffersize=i)

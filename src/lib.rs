@@ -13,7 +13,7 @@ mod spinningjenny {
     };
 
     use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
-    use pyo3::prelude::*;
+    use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
     #[pyclass]
@@ -98,9 +98,12 @@ mod spinningjenny {
     #[pyclass]
     struct ThreadPoolExecutor {
         pool: ThreadPool,
-        n_threads: usize,
         /// Cached `contextvars.copy_context`:
         copy_context: Py<PyAny>,
+        /// Python built-in `zip()`:
+        zip: Py<PyAny>,
+        /// Python's `itertools.repeat`:
+        repeat: Py<PyAny>,
     }
 
     #[pymethods]
@@ -108,9 +111,14 @@ mod spinningjenny {
         #[new]
         fn py_new(py: Python<'_>, n_threads: usize) -> PyResult<Self> {
             let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
+            let zip = py.eval(c"zip", None, None)?.unbind();
+            let repeat = py
+                .eval(c"__import__('itertools').repeat", None, None)?
+                .unbind();
             Ok(Self {
                 copy_context,
-                n_threads,
+                zip,
+                repeat,
                 pool: ThreadPoolBuilder::new()
                     .num_threads(n_threads)
                     .spawn_handler(|thread| {
@@ -124,21 +132,29 @@ mod spinningjenny {
             })
         }
 
-        #[pyo3(signature = (func, iterable, buffersize = None))]
+        #[pyo3(signature = (func, *iterables, buffersize = None))]
         fn map_unordered(
             &self,
             py: Python<'_>,
             func: Py<PyAny>,
-            iterable: Py<PyAny>,
-            buffersize: Option<usize>,
+            mut iterables: Vec<Py<PyAny>>,
+            buffersize: Option<isize>,
         ) -> PyResult<Py<ResultIter>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
-            // Make sure the iterable is iterable:
-            let py_iterator = iterable.bind(py).try_iter()?.unbind();
+            // zip(*((itertools.repeat(func),) + iterables)), so we can get
+            // tuples of matched values; this also checks if they actually are
+            // iterables.
+            let func_iterable = self.repeat.call1(py, (func,))?;
+            iterables.insert(0, func_iterable);
+            let iterables = PyTuple::new(py, iterables)?;
+            let py_iterator = self.zip.bind(py).call1(iterables)?.try_iter()?.unbind();
 
             let (sender, receiver) = if let Some(buffersize) = buffersize {
-                bounded(buffersize)
+                if buffersize < 1 {
+                    return Err(PyValueError::new_err("buffersize must be >= 1"));
+                }
+                bounded(buffersize as usize)
             } else {
                 unbounded()
             };
@@ -147,16 +163,15 @@ mod spinningjenny {
             // call.
             let generation = new_generation();
 
-            let n_threads = self.n_threads;
+            let n_threads = self.pool.current_num_threads();
             // Iterate over the Python iterator in the thread pool, and spawn
             // tasks there. The LIFO nature of Rayon's spawn() should ensure
             // lazy iteration over the Python iterator.
             self.pool.spawn(move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
-                    for (i, value) in py_iterator.bind(iterating_py).into_iter().enumerate() {
-                        let value = value?.unbind();
-                        let func = func.clone_ref(iterating_py);
+                    for (i, arguments) in py_iterator.bind(iterating_py).into_iter().enumerate() {
+                        let arguments = arguments?.extract::<Py<PyTuple>>()?;
                         let context = context.clone_ref(iterating_py);
                         let sender = sender.clone();
                         // This will spawn within the current pool.
@@ -164,11 +179,10 @@ mod spinningjenny {
                             Python::attach(move |thread_py| {
                                 let result = thread_local_context(thread_py, context, generation)
                                     .and_then(|local_context| {
-                                        local_context.call_method(
+                                        local_context.call_method1(
                                             thread_py,
-                                            "run",
-                                            (func, value),
-                                            None,
+                                            intern!(thread_py, "run"),
+                                            arguments,
                                         )
                                     });
                                 // We don't want to block while attached, since that
