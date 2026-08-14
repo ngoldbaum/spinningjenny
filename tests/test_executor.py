@@ -20,7 +20,11 @@ from spinningjenny._testing import run_for_usecs
 def test_parallel_thread_map_results(
     func: Callable, arguments: list[Iterable], n_jobs: int
 ) -> None:
-    """``parallel_thread_map()`` gives the same results as ``map()``."""
+    """
+    ``map_unordered()`` gives the same results as Python built-in ``map()``.
+
+    Other than order, anyway.
+    """
     expected = list(map(func, *arguments))
     with ThreadPoolExecutor(n_jobs) as pool:
         actual = pool.map_unordered(func, *arguments)
