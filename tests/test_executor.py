@@ -17,7 +17,9 @@ from spinningjenny._testing import run_for_usecs
     ],
 )
 @pytest.mark.parametrize("n_jobs", [1, 2, 4])
-def test_parallel_thread_map_results(func: Callable, arguments: list[Iterable], n_jobs: int) -> None:
+def test_parallel_thread_map_results(
+    func: Callable, arguments: list[Iterable], n_jobs: int
+) -> None:
     """``parallel_thread_map()`` gives the same results as ``map()``."""
     expected = list(map(func, *arguments))
     with ThreadPoolExecutor(n_jobs) as pool:
@@ -162,3 +164,11 @@ def test_drop_does_not_panic() -> None:
     it = executor.map_unordered(lambda x: x, range(1000), buffersize=5)
     next(it)
     del it
+
+
+def test_bad_buffersize() -> None:
+    """`buffersize` must be > 0."""
+    with ThreadPoolExecutor(2) as pool:
+        for i in [-100, -1, 0]:
+            with pytest.raises(ValueError, match="buffersize must be"):
+                pool.map_unordered(lambda x: 1, range(2), buffersize=i)

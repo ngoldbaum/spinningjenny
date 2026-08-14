@@ -13,7 +13,7 @@ mod spinningjenny {
     };
 
     use crossbeam_channel::{Receiver, TrySendError, bounded, unbounded};
-    use pyo3::{intern, prelude::*, types::PyTuple};
+    use pyo3::{exceptions::PyValueError, intern, prelude::*, types::PyTuple};
     use rayon::{ThreadPool, ThreadPoolBuilder};
 
     #[pyclass]
@@ -138,7 +138,7 @@ mod spinningjenny {
             py: Python<'_>,
             func: Py<PyAny>,
             mut iterables: Vec<Py<PyAny>>,
-            buffersize: Option<usize>,
+            buffersize: Option<isize>,
         ) -> PyResult<Py<ResultIter>> {
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
@@ -151,7 +151,10 @@ mod spinningjenny {
             let py_iterator = self.zip.bind(py).call1(iterables)?.try_iter()?.unbind();
 
             let (sender, receiver) = if let Some(buffersize) = buffersize {
-                bounded(buffersize)
+                if buffersize < 1 {
+                    return Err(PyValueError::new_err("buffersize must be >= 1"));
+                }
+                bounded(buffersize as usize)
             } else {
                 unbounded()
             };
