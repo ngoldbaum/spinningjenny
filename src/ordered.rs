@@ -8,23 +8,28 @@ use std::{
 
 pub struct OrderedBufferState {
     max_buffer_size: usize,
-    buffer_full: Mutex<bool>,
+    current_buffer_size: Mutex<usize>,
     still_has_space: Condvar,
 }
 
 impl OrderedBufferState {
-    /// Is the buffer full?
-    pub fn is_full(&self) -> bool {
-        *self.buffer_full.lock().unwrap()
+    /// How many slots are available to insert before the buffer fills up.
+    pub fn slots_available(&self) -> usize {
+        let current_size = *self.current_buffer_size.lock().unwrap();
+        if current_size >= self.max_buffer_size {
+            0
+        } else {
+            self.max_buffer_size - current_size
+        }
     }
 
-    /// Called by the producer, wait until the consumer has consumed the whole
-    /// batch.
+    /// Called by the producer, wait until there are slots available.
     pub fn wait_for_buffer_space(&self) {
-        let buffer_full_guard = self.buffer_full.lock().unwrap();
+        let max_size = self.max_buffer_size;
+        let current_size_guard = self.current_buffer_size.lock().unwrap();
         let _guard = self
             .still_has_space
-            .wait_while(buffer_full_guard, |buffer_full| *buffer_full)
+            .wait_while(current_size_guard, |current_size| max_size <= *current_size)
             .unwrap();
     }
 }
@@ -56,7 +61,7 @@ impl<M> OrderedResults<M> {
         let (buffer_state, producer) = if let Some(max_buffer_size) = buffer_size {
             let state = Arc::new(OrderedBufferState {
                 max_buffer_size,
-                buffer_full: Mutex::new(false),
+                current_buffer_size: Mutex::new(0),
                 still_has_space: Condvar::new(),
             });
             (Some(state.clone()), Some(state))
@@ -78,9 +83,9 @@ impl<M> OrderedResults<M> {
     fn buffer_size_changed(&self) {
         if let Some(buffer_state) = &self.buffer_state {
             let current_buffer_size = self.later_messages.len();
-            let mut buffer_full = buffer_state.buffer_full.lock().unwrap();
-            *buffer_full = current_buffer_size >= buffer_state.max_buffer_size;
-            if !(*buffer_full) {
+            let mut current_size_guard = buffer_state.current_buffer_size.lock().unwrap();
+            *current_size_guard = current_buffer_size;
+            if current_buffer_size < buffer_state.max_buffer_size {
                 buffer_state.still_has_space.notify_one();
             }
         }
@@ -171,7 +176,7 @@ impl<M> OrderedResults<M> {
             || self
                 .buffer_state
                 .as_ref()
-                .map(|bs| bs.is_full())
+                .map(|bs| bs.slots_available() == 0)
                 .unwrap_or(false)
     }
 }

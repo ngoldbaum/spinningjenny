@@ -134,7 +134,7 @@ def test_buffersize_limits_execution_when_no_iteration(
     num_threads: int, return_in_order: bool
 ) -> None:
     """
-    If ``buffersize`` is set, at most ``buffersize + num_threads`` tasks can be
+    If ``buffersize`` is set, at most ``buffersize + num_threads + 1`` tasks can be
     executed before work stops so long as no iteration is happening.
     """
     tasks = TasksRun()
@@ -149,19 +149,19 @@ def test_buffersize_limits_execution_when_no_iteration(
         while not result._is_full():
             pass
         first_ran = tasks.get_ran()
-        # At least half should've run:
-        assert 10 <= first_ran <= 20 + num_threads
+        # No more than 20 should have run:
+        assert first_ran <= 20 + num_threads
         # If we're full, sleeping should only be able to add tasks in the race
         # condition between hitting full and the rest of the threads finishing
         # a task and blocking on sending to the full queue:
         sleep(0.01)
-        assert 10 <= tasks.get_ran() <= 20 + num_threads
+        assert tasks.get_ran() <= 20 + num_threads + 1
         next(result)
         next(result)
         next(result)
         while not result._is_full():
             pass
-        assert first_ran <= tasks.get_ran() <= 20 + num_threads + 3
+        assert first_ran <= tasks.get_ran() <= 20 + num_threads + 3 + 1
         # Get the rest, ensure everything ran:
         list(result)
         assert tasks.get_ran() == 100

@@ -184,6 +184,10 @@ mod spinningjenny {
             buffersize: Option<usize>,
             return_in_order: bool,
         ) -> PyResult<Py<PyAny>> {
+            if buffersize == Some(0) {
+                return Err(PyValueError::new_err("buffersize must be >= 1"));
+            }
+
             // Copy the current contextvars context:
             let context = self.copy_context.call0(py)?;
             // zip(*((itertools.repeat(func),) + iterables)), so we can get
@@ -196,13 +200,10 @@ mod spinningjenny {
             let n_threads = self.pool.current_num_threads();
 
             let (sender, receiver) = if let Some(buffersize) = buffersize {
-                if buffersize < 1 {
-                    return Err(PyValueError::new_err("buffersize must be >= 1"));
-                }
                 if return_in_order {
-                    // Buffering also happens in the OrderedResults instance, so
-                    // split the difference.
-                    bounded((buffersize / 2).max(1))
+                    // Buffering happens in the OrderedResults instance, so
+                    // minimal room here.
+                    bounded(1)
                 } else {
                     bounded(buffersize)
                 }
@@ -211,16 +212,15 @@ mod spinningjenny {
             };
 
             let (ordered_results, ordered_producer) = if return_in_order {
-                let (results, producer) = OrderedResults::new(
-                    receiver.clone(),
-                    buffersize.map(|bsize| (bsize / 2).max(1)),
-                );
+                let (results, producer) = OrderedResults::new(receiver.clone(), buffersize);
                 (Some(results), producer)
             } else {
                 (None, None)
             };
 
-            let run_locally_internal = (4 * n_threads).min(buffersize.unwrap_or(usize::MAX));
+            // How often should the iterating worker thread take a break from
+            // iterating and do some actual work:
+            let run_locally_interval = (4 * n_threads).min(buffersize.unwrap_or(usize::MAX));
 
             // A unique id for the contextvars context associated with this
             // call.
@@ -231,6 +231,7 @@ mod spinningjenny {
             self.pool.spawn(move || {
                 let orig_sender = sender.clone();
                 let result = Python::attach(move |iterating_py| {
+                    let mut last_index_when_we_ran_tasks = 0;
                     for (message_index, arguments) in
                         py_iterator.bind(iterating_py).into_iter().enumerate()
                     {
@@ -270,22 +271,30 @@ mod spinningjenny {
                         // buffer is full, we'll need to wait until there is
                         // room in the downstream buffer to read more tasks from
                         // the task iterator.
-                        if let Some(ref ordered_producer) = ordered_producer
-                            && ordered_producer.is_full()
-                        {
-                            // Take the opportunity to process a task.
-                            rayon::yield_local();
-                            // Next, wait for buffer space to clear up:
-                            iterating_py.detach(|| ordered_producer.wait_for_buffer_space());
+                        if let Some(ref ordered_producer) = ordered_producer {
+                            let slots_available = ordered_producer.slots_available();
+                            if slots_available == 0 {
+                                // Take the opportunity to do some work:
+                                rayon::yield_now();
+                                // Wait for buffer space to become available:
+                                iterating_py.detach(|| ordered_producer.wait_for_buffer_space());
+                            } else if message_index - last_index_when_we_ran_tasks > slots_available
+                            {
+                                // Buffer is starting to fill up, so do some
+                                // work to prevent iterating too much and go
+                                // beyond the desired number of tasks in memory.
+                                while rayon::yield_now() != Some(rayon::Yield::Idle) {}
+                            }
                         }
 
-                        // Occasionally take a break from iterating to run some
-                        // tasks in this thread, so that we don't load too many
-                        // tasks into memory. Other threads should steal from
-                        // this one, so just because this one runs out of tasks
+                        // Take a break from iterating to run a tasks from this
+                        // thread's queue, so that we don't load too many tasks
+                        // into memory. Other threads should steal from this
+                        // one, so just because this one runs out of tasks
                         // doesn't mean no work is being done.
-                        if message_index > 0 && message_index.is_multiple_of(run_locally_internal) {
+                        if message_index > 0 && message_index.is_multiple_of(run_locally_interval) {
                             while rayon::yield_local() != Some(rayon::Yield::Idle) {}
+                            last_index_when_we_ran_tasks = message_index;
                         }
                     }
                     Result::<(), (usize, PyErr)>::Ok(())
