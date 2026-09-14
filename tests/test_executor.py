@@ -10,6 +10,13 @@ from spinningjenny import ThreadPoolExecutor
 from spinningjenny._testing import run_for_usecs
 
 
+@pytest.mark.parametrize("n_threads", [0, -1])
+def test_bad_n_threads(n_threads: int) -> None:
+    """The thread pool must contain at least one thread."""
+    with pytest.raises(ValueError, match="n_threads must be greater than 0"):
+        ThreadPoolExecutor(n_threads)
+
+
 @pytest.mark.parametrize(
     "func,arguments",
     [

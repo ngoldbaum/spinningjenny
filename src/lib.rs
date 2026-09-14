@@ -98,13 +98,16 @@ mod spinningjenny {
     #[pymethods]
     impl ThreadPoolExecutor {
         #[new]
-        fn py_new(py: Python<'_>, n_threads: usize) -> PyResult<Self> {
+        fn py_new(py: Python<'_>, n_threads: isize) -> PyResult<Self> {
+            if n_threads < 1 {
+                return Err(PyValueError::new_err("n_threads must be greater than 0"));
+            }
             let copy_context = py.import("contextvars")?.getattr("copy_context")?.unbind();
             let zip = py.eval(c"zip", None, None)?.unbind();
             let repeat = py
                 .eval(c"__import__('itertools').repeat", None, None)?
                 .unbind();
-            let pool_builder = ThreadPoolBuilder::new().num_threads(n_threads);
+            let pool_builder = ThreadPoolBuilder::new().num_threads(n_threads as usize);
             // TODO: Remove this version gate once PyO3
             // restores its attachment count only after reattaching succeeds.
             #[cfg(Py_3_14)]
