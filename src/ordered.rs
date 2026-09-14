@@ -16,11 +16,7 @@ impl OrderedBufferState {
     /// How many slots are available to insert before the buffer fills up.
     pub fn slots_available(&self) -> usize {
         let current_size = *self.current_buffer_size.lock().unwrap();
-        if current_size >= self.max_buffer_size {
-            0
-        } else {
-            self.max_buffer_size - current_size
-        }
+        self.max_buffer_size.saturating_sub(current_size)
     }
 
     /// Called by the producer, wait until there are slots available.
@@ -133,7 +129,7 @@ impl<M> OrderedResults<M> {
 
         // Next, check if it's in the receiver queue.
         for _ in 0..8 {
-            if let Some((id, message)) = self.receiver.try_recv().ok() {
+            if let Ok((id, message)) = self.receiver.try_recv() {
                 if let Some(message) = self.handle_new_message(id, message) {
                     return Ok(message);
                 }
@@ -156,7 +152,7 @@ impl<M> OrderedResults<M> {
         }
 
         // Next, check if it's in the receiver queue.
-        while let Some((id, message)) = self.receiver.recv().ok() {
+        while let Ok((id, message)) = self.receiver.recv() {
             if let Some(message) = self.handle_new_message(id, message) {
                 return Some(message);
             }

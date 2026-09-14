@@ -30,7 +30,7 @@ mod spinningjenny {
 
     impl UnorderedResultIter {
         fn new(receiver: Receiver<(usize, PyOutcome)>) -> Self {
-            Self { receiver: receiver }
+            Self { receiver }
         }
     }
 
@@ -42,7 +42,7 @@ mod spinningjenny {
 
         fn __next__(&self, py: Python<'_>) -> Option<PyOutcome> {
             // First, non-blocking fast pass:
-            if let Some((_, result)) = self.receiver.try_recv().ok() {
+            if let Ok((_, result)) = self.receiver.try_recv() {
                 return Some(result);
             }
             // If that fails, detach from Python and then block on recv():
