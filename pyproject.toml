@@ -17,11 +17,17 @@ module-name = "spinningjenny._spinningjenny"
 
 [project.optional-dependencies]
 test = [
+  "hypothesis",
   "pytest",
-  "pytest-benchmark"
 ]
 
 [dependency-groups]
+benchmark = [
+  "pytest-benchmark",
+  "joblib",
+  "scikit-learn",
+]
+
 lint = [
   "ruff",
   "mypy",
@@ -44,7 +50,7 @@ ignore_missing_imports = true
 # enable = ["pypy"]
 build-frontend = "build[uv]"
 test-extras = ["test"]
-test-command = "python -m pytest {project}/tests"
+test-command = "python -m pytest {project}/tests -v -v"
 
 [tool.cibuildwheel.linux]
 before-all = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"

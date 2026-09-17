@@ -35,9 +35,10 @@ jobs:
           - name: windows-x64
             runner: windows-latest
             build: "*-win*"
-          - name: windows-aarch64
-            runner: windows-11-arm
-            build: "*-win*"
+          # Very slow, so disabled for now until we have actual users.
+          # - name: windows-aarch64
+          #   runner: windows-11-arm
+          #   build: "*-win*"
           - name: macos-aarch64
             runner: macos-latest
             build: "*-macosx*"
